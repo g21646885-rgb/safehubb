@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Safe Hub | Phone Edition</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <style>
+        :root { --bg: #0f172a; --side: #1e293b; --accent: #8b5cf6; --text: #f8fafc; }
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: sans-serif; }
+        body { background: var(--bg); color: var(--text); display: flex; height: 100vh; overflow: hidden; }
+
+        /* Вход */
+        #authScreen { position: fixed; inset: 0; background: var(--bg); z-index: 1000; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 15px; }
+        .auth-card { background: var(--side); padding: 30px; border-radius: 20px; width: 320px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+        input { width: 100%; padding: 12px; margin: 10px 0; border-radius: 10px; border: 1px solid #334155; background: #0f172a; color: white; outline: none; }
+        .btn { width: 100%; padding: 12px; border-radius: 10px; border: none; background: var(--accent); color: white; font-weight: bold; cursor: pointer; }
+
+        /* Интерфейс */
+        .sidebar { width: 350px; background: var(--side); border-right: 1px solid #334155; display: flex; flex-direction: column; }
+        .tabs { display: flex; background: #111827; }
+        .tab { flex: 1; padding: 15px; text-align: center; cursor: pointer; font-size: 12px; opacity: 0.6; }
+        .tab.active { opacity: 1; border-bottom: 2px solid var(--accent); color: var(--accent); }
+        .main { flex: 1; display: flex; flex-direction: column; background: #020617; }
+        header { padding: 15px 25px; background: var(--side); display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
+        .messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+        .msg { max-width: 75%; padding: 10px 15px; border-radius: 15px; font-size: 14px; }
+        .sent { align-self: flex-end; background: var(--accent); }
+        .received { align-self: flex-start; background: #334155; }
+        footer { padding: 15px; background: var(--side); display: flex; gap: 10px; }
+        #callOverlay { display: none; position: fixed; inset: 0; background: #000; z-index: 2000; }
+        video { width: 100%; height: 100%; object-fit: cover; }
+    </style>
+</head>
+<body>
+
+    <div id="authScreen">
+        <div class="auth-card">
+            <h2 style="color: var(--accent); margin-bottom: 20px;">Safe Hub</h2>
+            <div id="phoneStep">
+                <input type="text" id="phoneNum" placeholder="+7 777 000 00 00">
+                <div id="recaptcha-container"></div>
+                <button class="btn" onclick="sendSMS()">Получить код</button>
+            </div>
+            <div id="codeStep" style="display: none;">
+                <input type="text" id="smsCode" placeholder="Код из SMS">
+                <button class="btn" onclick="confirmSMS()">Войти</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="sidebar">
+        <div id="myInfo" style="padding: 20px; border-bottom: 1px solid #334155; font-weight: bold;"></div>
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('users', this)">ЛИЧНЫЕ</div>
+            <div class="tab" onclick="switchTab('groups', this)">ГРУППЫ</div>
+        </div>
+        <div id="list" style="flex: 1; overflow-y: auto;"></div>
+        <button onclick="addGroup()" style="padding: 15px; background: #22c55e; border: none; color: white; cursor: pointer; font-weight: bold;">+ СОЗДАТЬ ГРУППУ</button>
+    </div>
+
+    <div class="main">
+        <header>
+            <b id="activeChat">Выберите чат</b>
+            <div style="display: flex; gap: 15px;">
+                <button onclick="startCall(false)" style="background:none; border:none; color:white; cursor:pointer;"><i class="fas fa-phone"></i></button>
+                <button onclick="startCall(true)" style="background:none; border:none; color:var(--accent); cursor:pointer;"><i class="fas fa-video"></i></button>
+            </div>
+        </header>
+        <div class="messages" id="msgBox"></div>
+        <footer>
+            <input type="text" id="msgInp" placeholder="Сообщение..." onkeypress="if(event.key==='Enter')send()">
+            <button onclick="send()" class="btn" style="width: auto; padding: 10px 20px;">Отправить</button>
+        </footer>
+    </div>
+
+    <div id="callOverlay">
+        <video id="remoteVideo" autoplay></video>
+        <button onclick="location.reload()" style="position:absolute; bottom:30px; left:50%; transform:translateX(-50%); padding:15px 30px; background:red; color:white; border-radius:30px; border:none; cursor:pointer;">Завершить</button>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getAuth, RecaptchaVerifier, signInWithPhoneNumber, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+        import { getDatabase, ref, set, onValue, push, onDisconnect } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyCGAxQalQWQD9BB2ExxBuGKG0zMmSUmnj4",
+            authDomain: "planning-with-ai-948ba.firebaseapp.com",
+            databaseURL: "https://planning-with-ai-948ba-default-rtdb.firebaseio.com",
+            projectId: "planning-with-ai-948ba",
+            storageBucket: "planning-with-ai-948ba.firebasestorage.app",
+            messagingSenderId: "496797499992",
+            appId: "1:496797499992:web:d8045ead0ee7efcf61c02d"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getDatabase(app);
+        const peer = new Peer();
+
+        let user, confirmation, myPeerId, targetId, mode = 'users';
+
+        // 1. АВТОРИЗАЦИЯ
+        window.sendSMS = () => {
+            const num = document.getElementById('phoneNum').value;
+            const verifier = new RecaptchaVerifier(auth, 'recaptcha-container', { size: 'invisible' });
+            signInWithPhoneNumber(auth, num, verifier).then(res => {
+                confirmation = res;
+                document.getElementById('phoneStep').style.display = 'none';
+                document.getElementById('codeStep').style.display = 'block';
+            }).catch(e => alert("Ошибка! Проверьте домены в Firebase: " + e.message));
+        };
+
+        window.confirmSMS = () => {
+            confirmation.confirm(document.getElementById('smsCode').value).catch(() => alert("Код неверный!"));
+        };
+
+        onAuthStateChanged(auth, u => {
+            if(u) {
+                user = u;
+                document.getElementById('authScreen').style.display = 'none';
+                document.getElementById('myInfo').innerText = u.phoneNumber;
+                initPeer();
+            }
+        });
+
+        // 2. СЕТЬ
+        function initPeer() {
+            peer.on('open', id => {
+                myPeerId = id;
+                set(ref(db, 'online/' + id), { id, name: user.phoneNumber });
+                onDisconnect(ref(db, 'online/' + id)).remove();
+                loadList();
+            });
+            peer.on('connection', c => c.on('data', d => appendMsg(d.from, d.text, 'received')));
+        }
+
+        // 3. СПИСКИ
+        window.switchTab = (t, el) => {
+            mode = t;
+            document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+            el.classList.add('active');
+            loadList();
+        };
+
+        function loadList() {
+            onValue(ref(db, mode === 'users' ? 'online/' : 'groups/'), snap => {
+                const list = document.getElementById('list');
+                list.innerHTML = "";
+                snap.forEach(child => {
+                    const item = child.val();
+                    if(item.id === myPeerId) return;
+                    const d = document.createElement('div');
+                    d.style = "padding:15px; border-bottom:1px solid #334155; cursor:pointer;";
+                    d.innerHTML = `<b>${item.name}</b>`;
+                    d.onclick = () => {
+                        targetId = item.id;
+                        document.getElementById('activeChat').innerText = item.name;
+                        if(mode === 'groups') loadGroupMsgs(item.id);
+                        else document.getElementById('msgBox').innerHTML = "";
+                    };
+                    list.appendChild(d);
+                });
+            });
+        }
+
+        window.addGroup = () => {
+            const n = prompt("Название группы:");
+            if(n) { const id = 'group_' + Date.now(); set(ref(db, 'groups/' + id), { id, name: n }); }
+        };
+
+        // 4. СООБЩЕНИЯ
+        window.send = () => {
+            const txt = document.getElementById('msgInp').value;
+            if(!txt || !targetId) return;
+            if(targetId.startsWith('group_')) {
+                push(ref(db, 'messages/' + targetId), { from: user.phoneNumber, text: txt });
+            } else {
+                const conn = peer.connect(targetId);
+                conn.on('open', () => {
+                    conn.send({ from: user.phoneNumber, text: txt });
+                    appendMsg("Вы", txt, 'sent');
+                });
+            }
+            document.getElementById('msgInp').value = "";
+        };
+
+        function loadGroupMsgs(gid) {
+            onValue(ref(db, 'messages/' + gid), snap => {
+                document.getElementById('msgBox').innerHTML = "";
+                snap.forEach(m => {
+                    const d = m.val();
+                    appendMsg(d.from, d.text, d.from === user.phoneNumber ? 'sent' : 'received');
+                });
+            });
+        }
+
+        function appendMsg(f, t, type) {
+            const b = document.getElementById('msgBox');
+            b.innerHTML += `<div class="msg ${type}"><small style="opacity:0.5; font-size:10px;">${f}</small><br>${t}</div>`;
+            b.scrollTop = b.scrollHeight;
+        }
+
+        window.startCall = (v) => {
+            navigator.mediaDevices.getUserMedia({video:v, audio:true}).then(s => {
+                document.getElementById('callOverlay').style.display = 'block';
+                const c = peer.call(targetId, s);
+                c.on('stream', rs => document.getElementById('remoteVideo').srcObject = rs);
+            });
+        };
+    </script>
+</body>
+</html>
